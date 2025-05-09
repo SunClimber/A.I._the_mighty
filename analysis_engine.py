@@ -2,49 +2,41 @@
 import pandas as pd
 
 def analyze_genre_trends_by_decade(df, subject_col='subjects', decade_col='decade_proxy'):
-    """Analyzes genre/subject trends over decades."""
+    """Analyzes genre/subject trends over decades for the market data."""
     if df is None or df.empty:
-        print("DataFrame is empty. Cannot analyze genre trends.")
-        return None, "No data available for genre trend analysis."
+        print("Market DataFrame is empty. Cannot analyze genre trends.")
+        return None, "No market data available for genre trend analysis."
 
-    # Explode subjects if they are semi-colon separated and extract main ones
-    # This part is crucial and needs adjustment based on your 'subjects' column format
     try:
-        # Attempt to split subjects and explode. Handle potential errors if column is not string.
         if not pd.api.types.is_string_dtype(df[subject_col]):
-             df[subject_col] = df[subject_col].astype(str) # Convert to string if not already
+             df[subject_col] = df[subject_col].astype(str)
 
+        # Subjects are semicolon-separated in data_handler
         subjects_expanded = df.assign(subject=df[subject_col].str.split('; ')).explode('subject')
         subjects_expanded['subject'] = subjects_expanded['subject'].str.strip().str.lower()
         
-        # Filter out very broad or non-descriptive subjects (example)
-        common_subjects_to_filter = ['fiction', 'literature', '', 'english language', 'text']
+        common_subjects_to_filter = ['fiction', 'literature', '', 'english language', 'text', 'unspecified', 'general'] # Added more
         subjects_expanded = subjects_expanded[~subjects_expanded['subject'].isin(common_subjects_to_filter)]
-        subjects_expanded = subjects_expanded[subjects_expanded['subject'].str.len() > 3] # Filter short/irrelevant subjects
+        subjects_expanded = subjects_expanded[subjects_expanded['subject'].str.len() > 3]
 
 
         if subjects_expanded.empty or subjects_expanded[decade_col].isnull().all():
-            print("No valid subjects or decades found after expansion/filtering.")
-            return None, "Insufficient data for genre trend analysis after processing subjects."
+            print("No valid subjects or decades found in market data after expansion/filtering.")
+            return None, "Insufficient market data for genre trend analysis after processing subjects."
 
-        # Count books per subject per decade
         genre_trends = subjects_expanded.groupby([decade_col, 'subject']).size().reset_index(name='book_count')
-        
-        # Get top N subjects overall to focus the trend analysis
         top_subjects = subjects_expanded['subject'].value_counts().nlargest(10).index.tolist()
         genre_trends_top = genre_trends[genre_trends['subject'].isin(top_subjects)]
 
         if genre_trends_top.empty:
-            return None, "No trend data for top subjects. The dataset might be too small or subjects too sparse."
+            return None, "No trend data for top subjects in market data. Dataset might be too small or subjects too sparse."
 
-        # Create a pivot table for easier plotting and summary
         pivot_trends = genre_trends_top.pivot_table(index=decade_col, columns='subject', values='book_count', fill_value=0)
         
-        # --- Generate Textual Summary ---
-        summary_lines = ["Genre Trend Analysis Summary (based on author birth year proxy decaded):"]
+        summary_lines = ["General Market Genre Trend Analysis Summary (based on author birth year proxy decaded):"]
         for subject in pivot_trends.columns:
             subject_data = pivot_trends[subject]
-            if subject_data.sum() == 0: continue # Skip if no books for this subject in the pivot
+            if subject_data.sum() == 0: continue
             
             peak_decade = subject_data.idxmax()
             peak_count = subject_data.max()
@@ -53,121 +45,122 @@ def analyze_genre_trends_by_decade(df, subject_col='subjects', decade_col='decad
                 f"- '{subject.capitalize()}': Total {total_count} books. "
                 f"Appeared most frequently in works by authors born in the {int(peak_decade)}s (with {int(peak_count)} books in that decade proxy)."
             )
-            # You could add more complex trend descriptions (e.g., increasing/decreasing)
-            # For example, comparing first half vs second half of observed decades
             non_zero_decades = subject_data[subject_data > 0].index
             if len(non_zero_decades) > 1:
-                first_decade_count = subject_data[non_zero_decades.min()]
-                last_decade_count = subject_data[non_zero_decades.max()]
+                first_decade_count = subject_data.loc[non_zero_decades.min()]
+                last_decade_count = subject_data.loc[non_zero_decades.max()]
                 if last_decade_count > first_decade_count:
                     summary_lines[-1] += " Shows a general increase in representation over the observed period by authors."
                 elif last_decade_count < first_decade_count:
                     summary_lines[-1] += " Shows a general decrease in representation over the observed period by authors."
-
-
         analysis_summary = "\n".join(summary_lines)
-        print("\n--- Genre Trend Analysis ---")
-        print(analysis_summary)
+        print("\n--- General Market Genre Trend Analysis ---")
+        # print(analysis_summary) # Keep console output tidy, will be in Excel
         return pivot_trends, analysis_summary
     
     except KeyError as e:
-        print(f"KeyError during genre trend analysis: {e}. Check column names.")
-        return None, f"Error in analysis: Missing column {e}."
+        print(f"KeyError during market genre trend analysis: {e}. Check column names.")
+        return None, f"Error in market analysis: Missing column {e}."
     except Exception as e:
-        print(f"An unexpected error occurred during genre trend analysis: {e}")
-        return None, f"Unexpected error in analysis: {e}"
+        print(f"An unexpected error occurred during market genre trend analysis: {e}")
+        return None, f"Unexpected error in market analysis: {e}"
 
 
 def analyze_prolific_authors(df, author_col='authors', subject_col='subjects', n_top_authors=5):
-    """Identifies most prolific authors and their common subjects."""
+    """Identifies most prolific authors (full names) and their common subjects from market data."""
     if df is None or df.empty:
-        print("DataFrame is empty. Cannot analyze prolific authors.")
-        return None, "No data available for prolific author analysis."
+        print("Market DataFrame is empty. Cannot analyze prolific authors.")
+        return None, "No market data available for prolific author analysis."
 
     try:
-        # Assuming 'authors' can be comma-separated if multiple authors
-        authors_expanded = df.assign(author_name=df[author_col].str.split(', ')).explode('author_name')
-        authors_expanded['author_name'] = authors_expanded['author_name'].str.strip()
+        # `df[author_col]` contains "Last1, First1; Last2, First2" or just "Last, First" (due to data_handler change)
+        # Step 1: Explode by the multi-author separator (';')
+        temp_df = df.assign(individual_author=df[author_col].str.split(';')).explode('individual_author')
         
-        # Filter out potential empty author names if split results in them
-        authors_expanded = authors_expanded[authors_expanded['author_name'] != '']
-
-
-        top_authors = authors_expanded['author_name'].value_counts().nlargest(n_top_authors)
+        # Step 2: Clean up each individual author name (strip whitespace)
+        temp_df['individual_author'] = temp_df['individual_author'].str.strip()
         
-        if top_authors.empty:
-            return None, "No author data to analyze or count."
+        # Step 3: Filter out empty strings that might result from splitting
+        temp_df = temp_df[temp_df['individual_author'] != '']
+        temp_df = temp_df.dropna(subset=['individual_author']) # Ensure no NaN authors
 
-        summary_lines = [f"Top {n_top_authors} Most Prolific Authors (based on book count):"]
+        # Step 4: Count occurrences of each full individual author name
+        top_authors_counts = temp_df['individual_author'].value_counts().nlargest(n_top_authors)
+
+        if top_authors_counts.empty:
+            return None, "No author data to analyze or count in market data."
+
+        summary_lines = [f"Top {n_top_authors} Most Prolific Authors (from Market Data, based on book count):"]
         author_details_for_ai = []
 
-        for author, count in top_authors.items():
-            author_books = df[df[author_col].str.contains(author, case=False, na=False)] # Find books by this author
+        for author_full_name, count in top_authors_counts.items():
+            # Get books by this specific author from the temp_df (which has one author per row)
+            author_books_this_author = temp_df[temp_df['individual_author'] == author_full_name]
             
-            # Get common subjects for this author
-            # This subject processing should mirror the one in genre_trends for consistency
-            if not pd.api.types.is_string_dtype(author_books[subject_col]):
-                author_books[subject_col] = author_books[subject_col].astype(str)
+            # To get subjects for these books, we use the original DataFrame's indices
+            original_indices = author_books_this_author.index.unique() # Get unique indices
+            author_books_original_df = df.loc[original_indices]
 
-            author_subjects_expanded = author_books.assign(subject=author_books[subject_col].str.split('; ')).explode('subject')
+            if not pd.api.types.is_string_dtype(author_books_original_df[subject_col]):
+                author_books_original_df[subject_col] = author_books_original_df[subject_col].astype(str)
+
+            # Subjects are semicolon-separated in data_handler
+            author_subjects_expanded = author_books_original_df.assign(subject=author_books_original_df[subject_col].str.split('; ')).explode('subject')
             author_subjects_expanded['subject'] = author_subjects_expanded['subject'].str.strip().str.lower()
             
-            common_subjects_to_filter = ['fiction', 'literature', '', 'english language', 'text'] # Consistent filtering
+            common_subjects_to_filter = ['fiction', 'literature', '', 'english language', 'text', 'unspecified', 'general']
             author_subjects_expanded = author_subjects_expanded[~author_subjects_expanded['subject'].isin(common_subjects_to_filter)]
             author_subjects_expanded = author_subjects_expanded[author_subjects_expanded['subject'].str.len() > 3]
-
 
             top_3_subjects = author_subjects_expanded['subject'].value_counts().nlargest(3).index.tolist()
             top_3_subjects_str = ", ".join(s.capitalize() for s in top_3_subjects) if top_3_subjects else "various subjects"
 
-            summary_lines.append(f"- {author}: {count} books. Common subjects include: {top_3_subjects_str}.")
+            summary_lines.append(f"- {author_full_name}: {count} books. Common subjects include: {top_3_subjects_str}.")
             author_details_for_ai.append({
-                "name": author,
+                "name": author_full_name,
                 "book_count": count,
                 "common_subjects": top_3_subjects
             })
         
         analysis_summary = "\n".join(summary_lines)
-        print("\n--- Prolific Author Analysis ---")
-        print(analysis_summary)
-        # We return the textual summary and structured data for AI
+        print("\n--- General Market Prolific Author Analysis ---")
+        # print(analysis_summary) # Keep console tidy
         return pd.DataFrame(author_details_for_ai), analysis_summary
 
     except KeyError as e:
-        print(f"KeyError during prolific author analysis: {e}. Check column names.")
-        return None, f"Error in analysis: Missing column {e}."
+        print(f"KeyError during market prolific author analysis: {e}. Check column names.")
+        return None, f"Error in market analysis: Missing column {e}."
     except Exception as e:
-        print(f"An unexpected error occurred during prolific author analysis: {e}")
-        return None, f"Unexpected error in analysis: {e}"
+        print(f"An unexpected error occurred during market prolific author analysis: {e}")
+        return None, f"Unexpected error in market analysis: {e}"
 
 
 if __name__ == '__main__':
-    # Create dummy data for testing
-    dummy_data = {
-        'id': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
-        'title': [f'Book {i}' for i in range(1, 16)],
-        'authors': ['Author A', 'Author B', 'Author A', 'Author C', 'Author B', 'Author A', 'Author D', 'Author A', 'Author B', 'Author C', 'Author A', 'Author D', 'Author A', 'Author E', 'Author E'],
-        'release_year_proxy': [1900, 1900, 1910, 1910, 1920, 1920, 1900, 1930, 1930, 1910, 1940, 1940, 1920, 1950, 1950],
-        'subjects': [
-            'Adventure; Pirates', 'Science fiction; Robots', 'Adventure; Exploration', 'Mystery; Detectives',
-            'Science fiction; Space travel', 'Adventure; Lost worlds', 'Historical fiction; Rome', 'Adventure; Jungle',
-            'Science fiction; Aliens', 'Mystery; Crime', 'Adventure; Treasure', 'Historical fiction; Medieval',
-            'Adventure; Survival', 'Romance; Contemporary', 'Romance; Historical'
+    # Dummy data for testing (assuming authors are semicolon-separated if multiple for one book)
+    dummy_market_data = {
+        'id': [1, 2, 3, 4, 5, 6],
+        'title': [f'Book {i}' for i in range(1, 7)],
+        'authors': [
+            'Austen, Jane', 'Shakespeare, William', 'Austen, Jane', 
+            'Twain, Mark; Warner, Charles Dudley', 'Shakespeare, William', 'Twain, Mark'
         ],
-        'languages': ['en']*15,
-        'download_count': [100*i for i in range(1,16)]
+        'author_birth_year': [1775, 1564, 1775, 1835, 1564, 1835],
+        'subjects': [
+            'Love stories; Domestic fiction', 'Tragedies; Drama', 'Bildungsromans',
+            'Satire; Picaresque', 'Comedies; Drama', 'Adventure stories; Boys -- fiction'
+        ]
     }
-    test_df = pd.DataFrame(dummy_data)
-    test_df['decade_proxy'] = (test_df['release_year_proxy'] // 10) * 10
+    test_df_market = pd.DataFrame(dummy_market_data)
+    test_df_market['decade_proxy'] = (test_df_market['author_birth_year'] // 10) * 10
 
-    # Test Genre Trends
-    genre_pivot, genre_summary = analyze_genre_trends_by_decade(test_df.copy())
+    print("--- Testing Market Genre Trends ---")
+    genre_pivot, genre_summary = analyze_genre_trends_by_decade(test_df_market.copy())
     if genre_pivot is not None:
-        print("\nGenre Pivot Table Head:")
         print(genre_pivot.head())
+        print(genre_summary)
 
-    # Test Prolific Authors
-    top_authors_df, authors_summary = analyze_prolific_authors(test_df.copy())
+    print("\n--- Testing Market Prolific Authors ---")
+    top_authors_df, authors_summary = analyze_prolific_authors(test_df_market.copy())
     if top_authors_df is not None:
-        print("\nTop Authors DataFrame:")
         print(top_authors_df)
+        print(authors_summary)
