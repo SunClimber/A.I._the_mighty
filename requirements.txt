@@ -5,3 +5,4 @@ python-dotenv
 google-generativeai
 openpyxl # For writing to .xlsx files
 requests # If fetching data from an API
+tabulate

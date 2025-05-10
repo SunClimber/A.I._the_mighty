@@ -1,294 +1,436 @@
 # main.py
 import pandas as pd
 from data_handler import load_data_from_csv, fetch_gutenberg_data_api, clean_market_data
-from analysis_engine import analyze_genre_trends_by_decade, analyze_prolific_authors
+from analysis_engine import (
+    analyze_genre_trends_by_decade, 
+    analyze_prolific_authors,
+    analyze_download_activity 
+)
 from generative_ai_handler import generate_text_from_prompt
-from visualization_handler import plot_genre_trends, save_data_to_excel
+from visualization_handler import (
+    plot_genre_trends, plot_top_authors, 
+    plot_subject_distribution, plot_persona_interest_summary
+)
 import time 
-import os # For dynamic output filenames
+import os 
+import re 
 
+# --- Helper function to format DataFrames for Markdown (remains same) ---
+def df_to_markdown_table(df, title=""):
+    # ... (keep as is) ...
+    if df is None or df.empty:
+        return f"#### {title}\n\nNo data available for this section.\n\n" if title else "No data available.\n\n"
+    header = f"#### {title}\n\n" if title else ""
+    return header + df.to_markdown(index=False) + "\n\n"
+
+# --- User Input Function (remains same) ---
 def get_user_book_details():
-    """Prompts the user for details about the book they want to vet."""
+    # ... (keep as is) ...
     print("\n--- User Book Details Input ---")
     title = input("Enter the title of the book: ").strip()
-    author = input("Enter the author (optional, leave blank if unknown): ").strip()
-    
-    print("Enter primary subjects/genres, separated by semicolons (e.g., Science fiction; Space opera; Adventure).")
-    subjects = input("Subjects/Genres: ").strip()
+    author = input("Enter the author (optional): ").strip()
+    subjects = input("Primary subjects/genres (semicolon-separated, e.g., Fantasy; Epic): ").strip()
+    synopsis = input("Enter a brief (1-3 sentences) synopsis of the book: ").strip()
     
     year_str = input("Approx. publication year (optional): ").strip()
     page_count_str = input("Estimated page count (optional): ").strip()
-    author_gender_str = input("Author's gender (e.g., male, female, non-binary - optional): ").strip()
+    author_gender_str = input("Author's gender (optional): ").strip()
+    author_age_str = input("Author's current age (if known/relevant, optional): ").strip()
 
-    year = None
+    num_personas_str = input("How many targeted reader personas to generate? (e.g., 2-4, default 3): ").strip()
+    num_personas_val = 3 
+    if num_personas_str:
+        try:
+            num_p = int(num_personas_str)
+            if 1 <= num_p <= 5: num_personas_val = num_p
+            else: print("  Invalid number of personas (must be 1-5). Using default 3.")
+        except ValueError: print("  Invalid input for number of personas. Using default 3.")
+
+    year, page_count, author_age = None, None, None
     if year_str:
         try: year = int(year_str)
         except ValueError: print(f"Warning: Invalid year '{year_str}'.")
-
-    page_count = None
     if page_count_str:
         try: page_count = int(page_count_str)
         except ValueError: print(f"Warning: Invalid page count '{page_count_str}'.")
+    if author_age_str: 
+        try: author_age = int(author_age_str)
+        except ValueError: print(f"Warning: Invalid author age '{author_age_str}'.")
 
-    if not title or not subjects:
-        print("Error: Title and Subjects/Genres are required.")
+    if not title or not subjects or not synopsis:
+        print("Error: Title, Subjects/Genres, and Synopsis are required for a meaningful analysis.")
         return None
-
     return {
-        "title": title,
-        "author": author if author else "Unknown Author",
-        "subjects": subjects,
-        "publication_year": year,
-        "page_count": page_count,
-        "author_gender": author_gender_str if author_gender_str else "Not specified"
+        "title": title, "author": author if author else "Unknown Author", "subjects": subjects,
+        "synopsis": synopsis, "publication_year": year, "page_count": page_count,
+        "author_gender": author_gender_str if author_gender_str else "Not specified",
+        "author_age": author_age, 
+        "num_personas_to_generate": num_personas_val
     }
 
-def generate_targeted_personas_for_user_book(user_book_details, market_context_summary="", num_personas=3):
-    """Generates personas specifically for the user's book type, optionally using market context."""
-    book_desc = (f"Title: '{user_book_details['title']}', Author: {user_book_details['author']}, "
-                 f"Subjects: '{user_book_details['subjects']}'")
+# --- AI Interaction Functions ---
+
+# summarize_historical_and_pg_download_context_md (remains same)
+def summarize_historical_and_pg_download_context_md(
+    historical_genre_summary_text, 
+    pg_download_activity_summary_text,
+    genre_plot_filename=None, 
+    subject_dist_plot_filename=None
+    ):
+    # ... (keep as is) ...
+    if not historical_genre_summary_text or not historical_genre_summary_text.strip():
+        historical_genre_summary_text = "Detailed historical trend data was not available."
+    if not pg_download_activity_summary_text or not pg_download_activity_summary_text.strip():
+        pg_download_activity_summary_text = "Download activity analysis was not available."
+
+    print("  Generating brief summary of historical context & PG download insights (AI)...")
+    
+    context_blocks = []
+    if historical_genre_summary_text and "not available" not in historical_genre_summary_text.lower():
+        context_blocks.append(f"Historical Literary Publication Trends (from classic, public domain works):\n{historical_genre_summary_text[:1000]}\n")
+    if pg_download_activity_summary_text and "not available" not in pg_download_activity_summary_text.lower():
+        context_blocks.append(f"Inferred Enduring Preferences (from current Project Gutenberg download activity for classics):\n{pg_download_activity_summary_text[:1000]}\n")
+
+    if not context_blocks:
+        return "No significant historical or Project Gutenberg download context was available to summarize.\n"
+    combined_detailed_context = "\n".join(context_blocks)
+
+    plot_references = []
+    if genre_plot_filename: plot_references.append(f"historical genre publication trends ([view plot]({os.path.join('output', genre_plot_filename)}))")
+    if subject_dist_plot_filename: plot_references.append(f"overall historical subject distribution by publication ([view plot]({os.path.join('output', subject_dist_plot_filename)}))")
+    
+    plot_links_text = ""
+    if plot_references:
+        plot_links_text = "You can explore visuals for " + " and ".join(plot_references) + " for more details."
+
+    prompt = f"""
+    Here's a compilation of analyses:
+    --- DETAILED CONTEXT ---
+    {combined_detailed_context}
+    --- END DETAILED CONTEXT ---
+
+    Please provide a very brief (1-2 short paragraphs, conversational, layman's terms) overview. 
+    First, touch upon the general historical literary publication patterns. 
+    Then, discuss any inferred enduring preferences based on current Project Gutenberg download activity for these classics.
+    Conclude by naturally incorporating the following plot information if provided:
+    {plot_links_text if plot_links_text else "No specific plot links to mention, just summarize the findings."}
+    """
+    brief_summary = generate_text_from_prompt(prompt)
+    final_summary_md = ""
+    if brief_summary and brief_summary.strip():
+        final_summary_md = brief_summary.strip()
+        if plot_links_text and not all(ref_part in final_summary_md.lower() for ref_part in ["genre publication", "subject distribution"]) and not "view plot" in final_summary_md.lower() :
+             final_summary_md += f"\n\n{plot_links_text}"
+    else: 
+        final_summary_md = "A brief look at historical literary trends and current Project Gutenberg download patterns provides some context."
+        if plot_links_text: final_summary_md += f" {plot_links_text}"
+    return final_summary_md.strip() + "\n\n"
+
+
+# generate_targeted_personas_md (remains same)
+def generate_targeted_personas_md(user_book_details, combined_context_summary="", num_personas=3):
+    # ... (keep as is) ...
+    book_desc = (f"Title: '{user_book_details['title']}', Author: {user_book_details['author']} (Age: {user_book_details.get('author_age', 'N/A')}), "
+                 f"Subjects: '{user_book_details['subjects']}'. Synopsis: {user_book_details['synopsis']}")
     if user_book_details['publication_year']: book_desc += f", Year: {user_book_details['publication_year']}"
     if user_book_details['page_count']: book_desc += f", ~{user_book_details['page_count']} pages"
     if user_book_details['author_gender'] != "Not specified": book_desc += f", Author Gender: {user_book_details['author_gender']}"
 
-    prompt_context = f"Consider a book with these characteristics: {book_desc}.\n"
-    if market_context_summary:
-        prompt_context += f"\nFor broader context, here's a summary of general book market trends (based on historical data):\n{market_context_summary}\n"
+    prompt_context = f"Considering a book with these characteristics: {book_desc}.\n"
+    if combined_context_summary: 
+        prompt_context += f"\nBackground context (historical literary patterns & inferred enduring classic preferences from PG downloads):\n{combined_context_summary}\n"
 
+    persona_format_instruction = """
+For each persona, provide the following information clearly using Markdown list format:
+- **Persona Name:** [Catchy, descriptive name]
+- **Core Appeal for THIS Book Type:** [Why this specific type of book, with its given synopsis and subjects, appeals to them? Consider author's age if relevant.]
+- **Reading Habits for THIS Book Type:** [How they consume such books]
+- **Other Complementary Preferences:** [Other genres/themes they enjoy that align]
+- **Key Expectations for THIS Specific Book:** [Specific elements they hope for in THIS book, given its title and synopsis]
+
+Separate each complete persona description with a line containing only '---NEXT PERSONA---'.
+"""
     prompt = f"""
     {prompt_context}
-    Based PRIMARILY on the characteristics of the specific book described above (and secondarily on any general market context provided), please generate {num_personas} distinct reader personas who would typically be most interested in THIS KIND of book.
-
-    For each persona:
-    1.  **Persona Name:** A catchy, descriptive name (e.g., "The Hardboiled Detective Aficionado" for a noir book).
-    2.  **Core Appeal:** Why would this specific type of book appeal to them? What are they seeking?
-    3.  **Reading Habits:** How do they typically consume books of this nature? (e.g., binge-read, savor slowly, discuss in book clubs).
-    4.  **Other Preferences:** What other specific genres, sub-genres, authors, or themes do they likely enjoy that are SIMILAR or COMPLEMENTARY to this book type?
-    5.  **Key Expectations for THIS Book:** What specific elements (e.g., plot pace, character depth, writing style, thematic exploration) would they hope to find in a book like the one described?
-
-    Format each persona clearly, starting with "Persona Name:". Make them highly relevant and specific to the book type.
+    Based PRIMARILY on the characteristics of the specific book described, generate {num_personas} distinct reader personas.
+    If the background context (historical patterns or enduring classic preferences) offers relevant contrasts or parallels that would shape a modern reader persona for THIS book type, you may subtly incorporate that.
+    {persona_format_instruction}
     """
-    print("\n--- Generating Targeted AI Personas for User's Book ---")
+    print(f"  Generating {num_personas} Targeted AI Personas for User's Book (Markdown focus)...")
     response_text = generate_text_from_prompt(prompt)
-    
-    personas_list = []
-    if response_text:
-        print("Generated Targeted Personas Text from AI:")
-        # print(response_text) # Keep console cleaner, will be in Excel
-        # Basic parsing - can be improved with regex or more structured AI output request
-        current_persona = {}
-        for line in response_text.split('\n'):
-            line_strip = line.strip()
-            if not line_strip: continue
+    if not response_text or not response_text.strip(): return []
+    return [block.strip() for block in response_text.split("---NEXT PERSONA---") if block.strip()]
 
-            if line_strip.startswith("Persona Name:") or "**Persona Name:**" in line_strip:
-                if current_persona: personas_list.append(current_persona)
-                current_persona = {"full_text": line_strip} # Store full line for name
-                try:
-                    current_persona["name"] = line_strip.split(":",1)[1].strip().replace("*","")
-                except:
-                    current_persona["name"] = f"Persona {len(personas_list)+1}"
-            elif current_persona: # Append lines to the current persona's full text
-                 current_persona["full_text"] += "\n" + line_strip
-                 # Attempt to parse individual fields (optional, full_text is fallback)
-                 if "Core Appeal:" in line_strip: current_persona["appeal"] = line_strip.split(":",1)[1].strip()
-                 elif "Reading Habits:" in line_strip: current_persona["habits"] = line_strip.split(":",1)[1].strip()
-                 elif "Other Preferences:" in line_strip: current_persona["other_prefs"] = line_strip.split(":",1)[1].strip()
-                 elif "Key Expectations for THIS Book:" in line_strip: current_persona["expectations"] = line_strip.split(":",1)[1].strip()
-        if current_persona: personas_list.append(current_persona)
-        
-        if not personas_list and response_text: # Fallback if parsing is minimal
-            return [{"name": "Unparsed Targeted Personas", "full_text": response_text}]
-        return personas_list
-    return []
-
-
-def gauge_persona_interest_with_market_trends(user_book_details, targeted_personas, market_trends_summary):
-    """
-    For each targeted persona, gauge their interest in the user's specific book,
-    considering general market trends.
-    """
-    print("\n--- Gauging Targeted Persona Interest (Considering Market Trends) ---")
-    interest_feedback_list = []
-    
-    book_desc = (f"Title: '{user_book_details['title']}', Author: {user_book_details['author']}, "
-                 f"Subjects: '{user_book_details['subjects']}'")
+# gauge_persona_interest_md (remains same)
+def gauge_persona_interest_md(user_book_details, persona_text_block, historical_pub_trends_summary, pg_download_inferred_prefs_summary):
+    # ... (keep as is) ...
+    persona_name_for_log = persona_text_block.splitlines()[0][:70] 
+    print(f"  Gauging interest for Persona: {persona_name_for_log}...")
+    book_desc = (f"Title: '{user_book_details['title']}', Subjects: '{user_book_details['subjects']}', "
+                 f"Author Age: {user_book_details.get('author_age', 'N/A')}. Synopsis: {user_book_details['synopsis']}")
     if user_book_details['publication_year']: book_desc += f", Year: {user_book_details['publication_year']}"
-    # Add other details if needed
 
-    for persona in targeted_personas:
-        persona_name = persona.get("name", "Unnamed Persona")
-        persona_description = persona.get("full_text", "No description available.")
-
-        prompt = f"""
-        You are '{persona_name}'. Your profile is:
-        {persona_description}
-
-        You are considering a specific book:
-        Book Details: {book_desc}
-
-        Now, consider the following general book market trends (based on historical data):
-        {market_trends_summary}
-
-        Questions for you, '{persona_name}':
-        1.  **Interest Level:** How interested are you in reading this specific book (High, Medium, Low, Not Interested)?
-        2.  **Reasoning (Persona-Based):** Explain your interest level based on your persona's core appeal and preferences for this type of book.
-        3.  **Impact of Market Trends:** How do the general market trends (e.g., popularity of certain genres, prolific authors in related areas) influence your decision or perception of this book? Does it make you more or less likely to read it, or does it not matter much to you? Explain why.
-        4.  **Key Factor:** What is the single most important factor (either from the book's details or market trends) influencing your interest?
-        """
-        # print(f"Interest Prompt for {persona_name} (with market trends):\n{prompt[:400]}...") # Debug
-        response_text = generate_text_from_prompt(prompt)
-        
-        feedback_entry = {"persona_name": persona_name}
-        if response_text:
-            # print(f"\nResponse from {persona_name} (re: market trends):")
-            # print(response_text) # Keep console cleaner
-            feedback_entry["interest_and_trend_reaction_AI"] = response_text
-            # Try to parse out the interest level if possible
-            if "Interest Level: High" in response_text: feedback_entry["parsed_interest"] = "High"
-            elif "Interest Level: Medium" in response_text: feedback_entry["parsed_interest"] = "Medium"
-            elif "Interest Level: Low" in response_text: feedback_entry["parsed_interest"] = "Low"
-            elif "Interest Level: Not Interested" in response_text: feedback_entry["parsed_interest"] = "Not Interested"
-        else:
-            feedback_entry["interest_and_trend_reaction_AI"] = "No response generated."
-        
-        interest_feedback_list.append(feedback_entry)
-        # time.sleep(2) # Small delay if making many calls
-        
-    return interest_feedback_list
-
-def generate_gtm_strategy_for_user_book(user_book_details, targeted_personas_feedback, market_analysis_summaries):
-    """Generates Go-To-Market strategy for the user's book."""
-    print("\n--- Generating Go-To-Market Strategy for User's Book ---")
-
-    book_desc_for_gtm = (f"a book titled '{user_book_details['title']}' by {user_book_details['author']}, "
-                         f"focusing on subjects '{user_book_details['subjects']}'")
-    # Add other details to book_desc_for_gtm as needed
-
-    market_summary_str = "General Market Insights:\n"
-    for key, summary in market_analysis_summaries.items():
-        market_summary_str += f"- {key}: {summary.splitlines()[0]}\n" # First line of each summary
-
-    persona_feedback_str = "Targeted Persona Feedback (considering market trends):\n"
-    if targeted_personas_feedback:
-        for feedback in targeted_personas_feedback:
-            persona_feedback_str += (f"- {feedback['persona_name']} (Interest: {feedback.get('parsed_interest', 'N/A')}): "
-                                     f"{feedback['interest_and_trend_reaction_AI'].splitlines()[1 if len(feedback['interest_and_trend_reaction_AI'].splitlines()) > 1 else 0]}\n") # Snippet
-    else:
-        persona_feedback_str = "No specific persona feedback available.\n"
-
+    interest_format_instruction = """
+Please structure your response with the following clear sections, using Markdown list format:
+- **Interest Level:** [High, Medium, Low, or Not Interested]
+- **Reasoning (Persona-Based):** [Your explanation based on your persona profile AND the specific book details (title, synopsis, author age etc.)]
+- **Reflection on Historical Publication Patterns:** [How does this book align or contrast with general historical publication patterns for similar genres/themes (as described in historical context)? Does this historical background make the book more or less appealing to you?]
+- **Reflection on Enduring Classic Preferences (from PG Downloads):** [How does this book relate to the types of classic themes/stories that show ongoing engagement on PG (as described in PG download context)? Does this make the book more or less appealing to you?]
+- **Key Factor for Interest:** [The single most important factor influencing your interest in THIS specific book]
+"""
     prompt = f"""
-    We are developing a go-to-market strategy for a specific book: {book_desc_for_gtm}.
+    You are a reader persona with the following profile:
+    {persona_text_block}
+
+    You are considering this specific book: {book_desc}
+
+    Contextual Information:
+    1. General historical literary PUBLICATION trends (from classic literature by author birth eras) indicate:
+       {historical_pub_trends_summary if historical_pub_trends_summary else "No specific historical publication trends provided."}
+    2. Inferred enduring preferences based on current Project Gutenberg DOWNLOAD activity for classics suggest:
+       {pg_download_inferred_prefs_summary if pg_download_inferred_prefs_summary else "No specific PG download preference insights provided."}
+
+    Please provide your feedback on the specific book using the following structure:
+    {interest_format_instruction}
+    """
+    response_text = generate_text_from_prompt(prompt)
+    parsed_interest_level = "Unknown"
+    if response_text:
+        match = re.search(r"\*\*Interest Level:\*\*\s*(High|Medium|Low|Not Interested)", response_text, re.IGNORECASE)
+        if match: parsed_interest_level = match.group(1).capitalize()
+    return response_text if response_text else "No AI response for this persona's interest.", parsed_interest_level
+
+
+# --- CORRECTED generate_gtm_strategy_md function signature and internal usage ---
+def generate_gtm_strategy_md(user_book_details, 
+                             aggregated_persona_interest_summary, 
+                             historical_pub_trends_summary,        # Now a separate argument
+                             pg_download_inferred_prefs_summary):  # Now a separate argument
+    """Generates GTM strategy, incorporating all contexts."""
+    print("  Generating Go-To-Market Strategy (Markdown focus)...")
+    book_desc_for_gtm = (f"Title: '{user_book_details['title']}', Author: {user_book_details['author']}, "
+                         f"Subjects: '{user_book_details['subjects']}', Author Age: {user_book_details.get('author_age', 'N/A')}. "
+                         f"Synopsis: {user_book_details['synopsis']}")
+
+    # Use the passed individual summaries
+    historical_context_str = "General Historical Literary Publication Patterns:\n" + \
+                             (historical_pub_trends_summary if historical_pub_trends_summary and historical_pub_trends_summary.strip() else "N/A")
+    pg_download_context_str = "Inferred Enduring Preferences from Classic PG Downloads:\n" + \
+                              (pg_download_inferred_prefs_summary if pg_download_inferred_prefs_summary and pg_download_inferred_prefs_summary.strip() else "N/A")
+
+    gtm_format_instruction = """
+Please structure your Go-To-Market strategy with the following clear sections, using Markdown:
+- **Overall Market Positioning:** [Briefly, how this book fits. (2-3 sentences)]
+- **Key Target Personas (for GTM):** [Identify 1-2 most promising personas. Briefly state why.]
+- **Marketing Strategy Points (3-4 points):** For each point:
+    - **Strategy [Number] - Action:** [Specific marketing action]
+    - **Strategy [Number] - Rationale:** [Link to the book's specifics, persona insights, and how it relates to historical patterns OR enduring classic preferences (from PG downloads). E.g., 'Leverage the novel's fresh take on [theme] which contrasts with historical norms but aligns with enduring interest in [classic theme from PG downloads].']
+- **Potential Challenge & Mitigation:** [One hurdle and how to address it.]
+""" # Added [Number] to Strategy points for clarity
+    prompt = f"""
+    Develop a concise go-to-market strategy for the book: {book_desc_for_gtm}.
 
     Supporting Information:
-    1.  General Market Context:
-        {market_summary_str}
-    2.  Feedback from Targeted Reader Personas (who considered the book against market trends):
-        {persona_feedback_str}
+    1.  Context from Historical Literary Publication Patterns: {historical_context_str}
+    2.  Context from Inferred Enduring Preferences (via PG Downloads): {pg_download_context_str}
+    3.  Summary of Targeted Persona Interest in this book (after considering above contexts): {aggregated_persona_interest_summary}
 
-    Based on all this information, please provide:
-    A.  **Overall Market Positioning:** Briefly, how does this book fit into the current market based on trends and persona reactions? (2-3 sentences)
-    B.  **Key Target Personas:** Identify the 2 most promising personas (from the feedback) to target for initial marketing.
-    C.  **Actionable GTM Strategy Points (3-4 points):**
-        For each point, suggest a specific marketing action. Explain the reasoning, linking it directly to:
-        -   The user's book characteristics.
-        -   The targeted personas' preferences or their reaction to market trends.
-        -   Relevant general market trends.
-    D.  **Potential Challenges & Mitigation (1-2 points):** What are potential hurdles, and how might they be addressed?
-
-    Be specific and practical in your recommendations.
+    Provide the GTM strategy using the structure below:
+    {gtm_format_instruction}
     """
-    # print(f"GTM Prompt:\n{prompt[:500]}...") # Debug
     response_text = generate_text_from_prompt(prompt)
-    if response_text:
-        # print("\nGo-To-Market Strategy Idea from AI:")
-        # print(response_text) # Keep console cleaner
-        return response_text
-    return "Could not generate go-to-market strategy for the user's book."
+    return response_text if response_text else "Could not generate GTM strategy from AI."
 
+# generate_overall_recommendation_md (remains same)
+def generate_overall_recommendation_md(user_book_details, aggregated_persona_interest_summary, gtm_highlights=""):
+    # ... (keep as is) ...
+    print("  Generating Overall Recommendation...")
+    book_desc = (f"Title: '{user_book_details['title']}', Subjects: '{user_book_details['subjects']}', "
+                 f"Author Age: {user_book_details.get('author_age', 'N/A')}. Synopsis: {user_book_details['synopsis']}")
 
+    recommendation_format_instruction = """
+Please provide your recommendation with the following structure, using Markdown:
+- **Overall Recommendation:** [Clearly state one: Strongly Recommend Pursuit, Recommend Pursuit with Considerations, Approach with Caution, or Not Recommended at this time.]
+- **Key Justification (2-4 sentences):** [Explain your recommendation, highlighting key factors from the persona interest analysis. Briefly mention if GTM seems viable based on the provided GTM highlights.]
+- **Confidence Score (Optional):** [Low/Medium/High]
+"""
+    prompt = f"""
+    You are an experienced publishing consultant. Based on the following information for a book ({book_desc}):
+    - Summary of Targeted Persona Interest (which included reflection on historical literary patterns and enduring classic preferences from PG downloads): {aggregated_persona_interest_summary}
+    - Highlights of potential Go-To-Market approach: {gtm_highlights if gtm_highlights else "GTM considerations to be detailed."}
+
+    Provide an overall recommendation to a publishing company on whether to pursue this book. Use the structure below:
+    {recommendation_format_instruction}
+    """
+    response_text = generate_text_from_prompt(prompt)
+    return response_text if response_text else "Could not generate an overall recommendation."
+
+# --- Main Orchestration ---
 def main():
-    print("--- Starting Book Vetting & Marketing Analysis Workflow ---")
+    print("--- Starting Book Vetting & Marketing Analysis Workflow (Markdown Output) ---")
+    os.makedirs("output", exist_ok=True) 
 
     user_book = get_user_book_details()
-    if not user_book:
-        print("Exiting due to incomplete user book details.")
-        return
+    if not user_book: return
+    clean_title_for_files = "".join(c if c.isalnum() else "_" for c in user_book['title'])[:25]
+    if not clean_title_for_files: clean_title_for_files = "untitled_book"
+    
+    report_md_lines = [f"# Book Vetting Analysis: {user_book['title']}\n"]
 
-    excel_data_sheets = {"UserInput_BookDetails": pd.DataFrame([user_book])}
+    report_md_lines.append("## I. User-Provided Book Details\n")
+    for key, value in user_book.items():
+        display_key = key.replace("_", " ").title()
+        report_md_lines.append(f"- **{display_key}:** {value}\n")
+    report_md_lines.append("\n")
 
-    # 1. General Market Analysis (from Gutendex)
-    print("\nStep 1: Analyzing General Book Market Trends...")
-    df_market = fetch_gutenberg_data_api(limit=500) # Adjust limit: more data = better general trends
-    if df_market is None or df_market.empty:
-        print("Market data could not be fetched. Some analyses will be limited.")
-        market_analysis_summaries = {} # Ensure it's defined
-    else:
+    recommendation_placeholder_index = len(report_md_lines) 
+    report_md_lines.append("## II. Overall Recommendation & Justification\n\n_[Generating recommendation...this will be updated.]_\n\n")
+
+    # --- Contextual Analysis ---
+    print("\nStep 1: Analyzing Context (Historical Literary Trends & PG Download Activity)...")
+    appendix_md_lines = ["## VI. Appendix: Contextual Analysis Details\n"] 
+    
+    df_market = fetch_gutenberg_data_api(limit=500) 
+    output_plots_dir = "output"
+
+    historical_genre_pub_summary_text = "Historical genre publication trend data not available for context." # Default
+    pg_download_activity_summary_text = "Project Gutenberg download activity analysis not available for context." # Default
+    genre_trends_plot_file, subject_dist_pub_plot_file = None, None
+    # Optional download plots: subject_download_plot_file, author_download_plot_file = None, None
+
+
+    if df_market is not None and not df_market.empty:
         df_market_cleaned = clean_market_data(df_market.copy())
         if df_market_cleaned is not None and not df_market_cleaned.empty:
-            excel_data_sheets["MarketData_RawSample"] = df_market.head(100)
-            excel_data_sheets["MarketData_CleanedSample"] = df_market_cleaned.head(100)
-
-            market_analysis_summaries = {}
-            genre_pivot, genre_sum = analyze_genre_trends_by_decade(df_market_cleaned.copy())
-            if genre_sum: market_analysis_summaries["Market Genre Trends"] = genre_sum
-            if genre_pivot is not None: excel_data_sheets["Market_GenreTrendsPivot"] = genre_pivot.reset_index()
-
-            authors_df, authors_sum = analyze_prolific_authors(df_market_cleaned.copy())
-            if authors_sum: market_analysis_summaries["Market Prolific Authors"] = authors_sum
-            if authors_df is not None: excel_data_sheets["Market_TopAuthors"] = authors_df
+            # 1a. Historical Publication Trends
+            genre_pivot, hist_genre_sum_text_detailed, subject_pub_counts = analyze_genre_trends_by_decade(df_market_cleaned.copy())
+            if hist_genre_sum_text_detailed: historical_genre_pub_summary_text = hist_genre_sum_text_detailed # Use the detailed one for AI context
+            if genre_pivot is not None: 
+                genre_trends_plot_file = plot_genre_trends(genre_pivot, user_book['title'], output_dir=output_plots_dir)
+            if subject_pub_counts is not None and not subject_pub_counts.empty:
+                subject_dist_pub_plot_file = plot_subject_distribution(subject_pub_counts, user_book['title'], output_dir=output_plots_dir, plot_type="publication")
             
-            if genre_pivot is not None and not genre_pivot.empty:
-                plot_genre_trends(genre_pivot, output_path=f"output/market_genre_trends_plot_for_{user_book['title'][:20].replace(' ','_')}.png")
+            # Prolific authors (by pub vol) - not directly used in main report text but plot can be in appendix
+            authors_df_pub_table, _ = analyze_prolific_authors(df_market_cleaned.copy())
+            if authors_df_pub_table is not None:
+                 plot_top_authors(authors_df_pub_table, user_book['title'], output_dir=output_plots_dir, plot_type="publication")
+
+
+            # 1b. Project Gutenberg Download Activity Analysis
+            pg_dl_sum_text_detailed, df_top_subj_dl, df_top_auth_dl = analyze_download_activity(df_market_cleaned.copy())
+            if pg_dl_sum_text_detailed: pg_download_activity_summary_text = pg_dl_sum_text_detailed # Use detailed for AI context
+            # Optional: Plots for download activity
+            # if df_top_subj_dl is not None: subject_download_plot_file = plot_subject_distribution(df_top_subj_dl.set_index('subject')['download_count'], user_book['title'], output_dir=output_plots_dir, plot_type="download")
+            # if df_top_auth_dl is not None: author_download_plot_file = plot_top_authors(df_top_auth_dl, user_book['title'], output_dir=output_plots_dir, plot_type="download")
+
+            # AI-Generated Brief Summary for Appendix using the detailed summaries
+            brief_overall_context_summary = summarize_historical_and_pg_download_context_md(
+                historical_genre_pub_summary_text, 
+                pg_download_activity_summary_text,
+                genre_plot_filename=genre_trends_plot_file,
+                subject_dist_plot_filename=subject_dist_pub_plot_file
+            )
+            appendix_md_lines.append("### Brief Overview of Historical Literary Context & PG Download Insights\n")
+            appendix_md_lines.append(brief_overall_context_summary)
         else:
-            print("Market data cleaning failed. Some analyses will be limited.")
-            market_analysis_summaries = {}
-
-
-    # 2. Generate Targeted Personas for User's Book
-    print("\nStep 2: Generating Targeted Reader Personas for Your Book...")
-    market_context_for_personas = "\n".join(market_analysis_summaries.values())
-    targeted_personas = generate_targeted_personas_for_user_book(user_book, market_context_for_personas)
-    if targeted_personas:
-        df_personas_for_excel = pd.DataFrame(targeted_personas) # Uses 'name' and 'full_text' and other parsed fields
-        excel_data_sheets["TargetedPersonas_UserBook"] = df_personas_for_excel
+            appendix_md_lines.append("Historical market data cleaning failed; context limited.\n")
     else:
-        print("Could not generate targeted personas for the user's book.")
+        appendix_md_lines.append("Historical market data could not be fetched; context limited.\n")
+    appendix_md_lines.append("\n")
 
-    # 3. Gauge Persona Interest in User's Book (Considering Market Trends)
-    all_market_trends_summary = "Overall Market Snapshot:\n" + market_context_for_personas
-    persona_trend_feedback = []
-    if targeted_personas and market_analysis_summaries: # Need both personas and market trends
-        print("\nStep 3: Gauging Persona Interest in Your Book (with Market Context)...")
-        persona_trend_feedback = gauge_persona_interest_with_market_trends(user_book, targeted_personas, all_market_trends_summary)
-        if persona_trend_feedback:
-            excel_data_sheets["PersonaInterest_MarketContext_UserBook"] = pd.DataFrame(persona_trend_feedback)
-    elif not targeted_personas:
-        print("Skipping interest gauging: No targeted personas.")
-    elif not market_analysis_summaries:
-        print("Skipping interest gauging: No market trend data for context.")
+    # 2. Generate Targeted Personas
+    print("\nStep 2: Generating Targeted Reader Personas for Your Book...")
+    report_md_lines.append("## III. Targeted Reader Personas for Your Book\n")
+    # Use the brief AI-generated summary of all contexts for persona generation
+    context_for_persona_ai = brief_overall_context_summary if 'brief_overall_context_summary' in locals() and brief_overall_context_summary else "General literary context not fully analyzed for this run."
+    num_personas_to_gen = user_book.get("num_personas_to_generate", 3)
+    targeted_persona_text_blocks = generate_targeted_personas_md(user_book, context_for_persona_ai, num_personas=num_personas_to_gen)
+    
+    if targeted_persona_text_blocks:
+        for i, persona_block in enumerate(targeted_persona_text_blocks):
+            persona_name_match = re.search(r"\*\*Persona Name:\*\*\s*(.*)", persona_block)
+            persona_heading_name = persona_name_match.group(1).strip() if persona_name_match else f"Persona {i+1}"
+            report_md_lines.append(f"### {persona_heading_name}\n")
+            report_md_lines.append(persona_block + "\n\n")
+    else:
+        report_md_lines.append("Could not generate targeted personas.\n")
 
+    # 3. Gauge Persona Interest
+    persona_interest_feedbacks_md_blocks = [] 
+    all_interest_levels_for_plot = [] 
+    
+    if targeted_persona_text_blocks : # Only need personas to proceed
+        print("\nStep 3: Gauging Persona Interest in Your Book (with Context)...")
+        report_md_lines.append("## IV. Persona Interest in Your Book (Contextualized)\n")
+        
+        # Pass the detailed (not AI-briefed) summaries for richer context during interest gauging
+        for i, persona_full_text_block in enumerate(targeted_persona_text_blocks):
+            interest_text_block, parsed_level = gauge_persona_interest_md(
+                user_book, 
+                persona_full_text_block, 
+                historical_genre_pub_summary_text, 
+                pg_download_activity_summary_text  
+            )
+            persona_name_match = re.search(r"\*\*Persona Name:\*\*\s*(.*)", persona_full_text_block)
+            current_persona_name_for_heading = persona_name_match.group(1).strip() if persona_name_match else f"Persona {i+1}"
+            report_md_lines.append(f"### Feedback from: {current_persona_name_for_heading}\n")
+            report_md_lines.append(interest_text_block + "\n\n")
+            persona_interest_feedbacks_md_blocks.append(f"Feedback from {current_persona_name_for_heading}:\n{interest_text_block}")
+            if parsed_level != "Unknown": all_interest_levels_for_plot.append(parsed_level)
+    else:
+        report_md_lines.append("Skipping detailed persona interest gauging (no personas generated).\n")
+
+    persona_interest_plot_file = None
+    if all_interest_levels_for_plot:
+        persona_interest_plot_file = plot_persona_interest_summary(all_interest_levels_for_plot, user_book['title'], output_dir=output_plots_dir)
+        if persona_interest_plot_file:
+            try: 
+                idx_interest_header = report_md_lines.index("## IV. Persona Interest in Your Book (Contextualized)\n")
+                report_md_lines.insert(idx_interest_header + 1, f"\n_(Aggregated interest levels - [view plot]({os.path.join(output_plots_dir, persona_interest_plot_file)}))_\n\n")
+            except ValueError: 
+                report_md_lines.append(f"\n_(Aggregated interest levels - [view plot]({os.path.join(output_plots_dir, persona_interest_plot_file)}))_\n\n")
 
     # 4. Generate Go-To-Market Strategy
     print("\nStep 4: Generating Go-To-Market Strategy for Your Book...")
-    gtm_strategy = generate_gtm_strategy_for_user_book(user_book, persona_trend_feedback, market_analysis_summaries)
-    if gtm_strategy:
-        excel_data_sheets["GTM_Strategy_UserBook_AI"] = gtm_strategy # Saved as text summary
-    else:
-        print("Could not generate GTM strategy.")
+    report_md_lines.append("## V. Go-To-Market Strategy Suggestions\n")
+    aggregated_interest_summary_for_gtm = "Overall persona interest levels: " + (", ".join(all_interest_levels_for_plot) if all_interest_levels_for_plot else "Not determined.")
+    # Pass detailed summaries to GTM as well
+    gtm_strategy_text = generate_gtm_strategy_md(user_book, aggregated_interest_summary_for_gtm, 
+                                                 historical_genre_pub_summary_text, 
+                                                 pg_download_activity_summary_text) # CORRECTED CALL
+    report_md_lines.append(gtm_strategy_text + "\n\n")
 
+    # 5. Generate Overall Recommendation
+    print("\nStep 5: Generating Overall Recommendation...")
+    gtm_highlights_for_reco = "GTM strategy outlined."
+    if "Error" in gtm_strategy_text or "Could not generate" in gtm_strategy_text or not gtm_strategy_text.strip():
+        gtm_highlights_for_reco = "GTM strategy generation was inconclusive or faced issues."
+    elif gtm_strategy_text:
+        match_positioning = re.search(r"\*\*Overall Market Positioning:\*\*\s*(.*)", gtm_strategy_text, re.IGNORECASE)
+        if match_positioning: gtm_highlights_for_reco = f"Key GTM Insight - Market Positioning: {match_positioning.group(1).strip()[:150]}..."
+            
+    overall_recommendation_text = generate_overall_recommendation_md(user_book, aggregated_interest_summary_for_gtm, gtm_highlights_for_reco)
+    actual_recommendation_section_md = f"## II. Overall Recommendation & Justification\n{overall_recommendation_text}\n\n"
+    report_md_lines[recommendation_placeholder_index] = actual_recommendation_section_md
 
-    # 5. Save all outputs
-    print("\nStep 5: Saving All Analysis to Excel...")
-    # Sanitize filename from user input title
-    clean_title = "".join(c if c.isalnum() else "_" for c in user_book['title'])[:30] # Max 30 chars, alphanumeric
-    output_excel_filename = f"output/book_analysis_{clean_title}.xlsx"
-    save_data_to_excel(excel_data_sheets, output_path=output_excel_filename)
+    report_md_lines.extend(appendix_md_lines)
 
-    print(f"\n--- Analysis Complete for '{user_book['title']}' ---")
-    print(f"Results saved to: {output_excel_filename}")
-    if any(plot_path for plot_path in os.listdir("output") if plot_path.startswith("market_genre_trends_plot")):
-         print("Market trend plot also saved in 'output' directory.")
+    # 6. Save Markdown file & Print key parts
+    print("\nStep 6: Finalizing Report...")
+    final_markdown_report_str = "".join(report_md_lines)
+    
+    print("\n\n--- Executive Summary & Recommendation (from Report) ---")
+    print(overall_recommendation_text if overall_recommendation_text else "Recommendation could not be generated.")
+    print("\n--- Aggregated Persona Interest ---")
+    print(aggregated_interest_summary_for_gtm)
+
+    output_md_filename = os.path.join(output_plots_dir, f"book_analysis_report_{clean_title_for_files}.md")
+    try:
+        with open(output_md_filename, "w", encoding="utf-8") as f: f.write(final_markdown_report_str)
+        print(f"\n--- Analysis Complete for '{user_book['title']}' ---")
+        print(f"Markdown report saved to: {output_md_filename}")
+        print(f"Plots saved in '{output_plots_dir}' directory.")
+    except Exception as e: print(f"Error saving Markdown report: {e}")
 
 if __name__ == "__main__":
     main()
