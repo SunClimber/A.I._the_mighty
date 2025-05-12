@@ -1,5 +1,4 @@
-# Project Title: AI-Powered Book Vetting & Market Strategy Assistant 
-**(Choose a catchy and descriptive title for your project)**
+# Project Title: Book Vetting & Market Strategy Assistant 
 
 **Course:** Generative AI for Business and Data Analysis
 **Author:** Sam Reynebeau
